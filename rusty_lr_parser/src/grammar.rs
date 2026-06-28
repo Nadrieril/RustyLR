@@ -2959,16 +2959,62 @@ impl Grammar {
                                 next_state.push = false;
                                 changed = true;
                             }
-                            Some(ReduceAction::Identity(_)) => {
-                                let idx = state
-                                    .shift_goto_map_nonterm
-                                    .iter()
-                                    .position(|(nt, _)| *nt == nonterm_idx)
-                                    .unwrap();
-                                let ns = state.shift_goto_map_nonterm[idx].1;
-                                next_state.state = ns.state;
-                                next_state.push = true;
-                                changed = true;
+                            Some(ReduceAction::Identity(identity_idx)) => {
+                                // The Identity bypass is only safe when the source token and
+                                // the target nonterminal share the same Data enum variant,
+                                // i.e. when their type strings are identical.
+                                // Type aliases (e.g. `type Alias = T`) have different string
+                                // representations even though they are the same Rust type,
+                                // so they get different variants.  Bypassing in that case
+                                // would leave the wrong variant on the data stack.
+                                let source_symbol = rule.tokens[identity_idx].symbol;
+                                let source_key = match source_symbol {
+                                    Symbol::NonTerminal(src_idx) => {
+                                        self.nonterminals[src_idx].ruletype.as_ref().map(|ts| {
+                                            let s: String = ts
+                                                .to_string()
+                                                .chars()
+                                                .filter(|c| !c.is_whitespace())
+                                                .collect();
+                                            format!(
+                                                "{}_boxed:{}",
+                                                s, self.nonterminals[src_idx].ruletype_boxed
+                                            )
+                                        })
+                                    }
+                                    Symbol::Terminal(_) => {
+                                        let s: String = self
+                                            .token_typename
+                                            .to_string()
+                                            .chars()
+                                            .filter(|c| !c.is_whitespace())
+                                            .collect();
+                                        Some(format!("{}_boxed:{}", s, self.is_tokentype_boxed))
+                                    }
+                                };
+                                let target_key =
+                                    self.nonterminals[nonterm_idx].ruletype.as_ref().map(|ts| {
+                                        let s: String = ts
+                                            .to_string()
+                                            .chars()
+                                            .filter(|c| !c.is_whitespace())
+                                            .collect();
+                                        format!(
+                                            "{}_boxed:{}",
+                                            s, self.nonterminals[nonterm_idx].ruletype_boxed
+                                        )
+                                    });
+                                if source_key == target_key {
+                                    let idx = state
+                                        .shift_goto_map_nonterm
+                                        .iter()
+                                        .position(|(nt, _)| *nt == nonterm_idx)
+                                        .unwrap();
+                                    let ns = state.shift_goto_map_nonterm[idx].1;
+                                    next_state.state = ns.state;
+                                    next_state.push = true;
+                                    changed = true;
+                                }
                             }
                             _ => {}
                         }
@@ -2992,16 +3038,57 @@ impl Grammar {
                                 state.shift_goto_map_nonterm[i].1.push = false;
                                 changed = true;
                             }
-                            Some(ReduceAction::Identity(_)) => {
-                                let idx = state
-                                    .shift_goto_map_nonterm
-                                    .iter()
-                                    .position(|(nt, _)| *nt == nonterm_idx)
-                                    .unwrap();
-                                let ns = state.shift_goto_map_nonterm[idx].1;
-                                state.shift_goto_map_nonterm[i].1.state = ns.state;
-                                state.shift_goto_map_nonterm[i].1.push = true;
-                                changed = true;
+                            Some(ReduceAction::Identity(identity_idx)) => {
+                                // Same guard as in the terminal shift loop above: only bypass
+                                // when source and target share the same Data enum variant.
+                                let source_symbol = rule.tokens[identity_idx].symbol;
+                                let source_key = match source_symbol {
+                                    Symbol::NonTerminal(src_idx) => {
+                                        self.nonterminals[src_idx].ruletype.as_ref().map(|ts| {
+                                            let s: String = ts
+                                                .to_string()
+                                                .chars()
+                                                .filter(|c| !c.is_whitespace())
+                                                .collect();
+                                            format!(
+                                                "{}_boxed:{}",
+                                                s, self.nonterminals[src_idx].ruletype_boxed
+                                            )
+                                        })
+                                    }
+                                    Symbol::Terminal(_) => {
+                                        let s: String = self
+                                            .token_typename
+                                            .to_string()
+                                            .chars()
+                                            .filter(|c| !c.is_whitespace())
+                                            .collect();
+                                        Some(format!("{}_boxed:{}", s, self.is_tokentype_boxed))
+                                    }
+                                };
+                                let target_key =
+                                    self.nonterminals[nonterm_idx].ruletype.as_ref().map(|ts| {
+                                        let s: String = ts
+                                            .to_string()
+                                            .chars()
+                                            .filter(|c| !c.is_whitespace())
+                                            .collect();
+                                        format!(
+                                            "{}_boxed:{}",
+                                            s, self.nonterminals[nonterm_idx].ruletype_boxed
+                                        )
+                                    });
+                                if source_key == target_key {
+                                    let idx = state
+                                        .shift_goto_map_nonterm
+                                        .iter()
+                                        .position(|(nt, _)| *nt == nonterm_idx)
+                                        .unwrap();
+                                    let ns = state.shift_goto_map_nonterm[idx].1;
+                                    state.shift_goto_map_nonterm[i].1.state = ns.state;
+                                    state.shift_goto_map_nonterm[i].1.push = true;
+                                    changed = true;
+                                }
                             }
                             _ => {}
                         }
@@ -4430,6 +4517,88 @@ mod tests {
             matches!(err, ArgError::DuplicateStartSymbol { ref name, .. } if name == "Expr"),
             "Expected DuplicateStartSymbol error, got {:?}",
             err
+        );
+    }
+
+    /// Regression test for https://github.com/ehwan/RustyLR/issues/90
+    ///
+    /// When a nonterminal's declared type is a type alias with a different name than the
+    /// underlying type (e.g. `type LetStatement = Statement`), the Identity-reduce
+    /// state-machine optimization must NOT bypass the reduction step.  Both types receive
+    /// different Data enum variants because they have different string representations,
+    /// so bypassing would leave the wrong variant on the data stack and cause a
+    /// debug-assertion panic at runtime.
+    ///
+    /// This test verifies that the grammar builds successfully and that the emitted code
+    /// keeps both `Statement` and `LetStatement` as distinct Data-enum variants.
+    #[test]
+    fn test_type_alias_identity_optimization_issue90() {
+        let input = quote! {
+            %glr;
+            %tokentype Token;
+            %start Program;
+
+            %token LET Token::Let;
+            %token IDENT Token::Ident;
+            %token SEMI Token::Semi;
+
+            Program(Vec<Statement>) : statements=Statement* { statements };
+
+            Statement(Statement)
+                : SEMI! { Statement::Empty }
+                | statement=LetStatement { statement }
+                ;
+
+            // LetStatement uses a type name different from `Statement`, simulating
+            // `pub type LetStatement = Statement;` in user code.
+            LetStatement(LetStatement)
+                : LET! name=IDENT SEMI! { LetStatement(name) }
+                ;
+        };
+
+        let grammar_args = Grammar::parse_args(input).expect("Failed to parse grammar args");
+        let mut grammar =
+            Grammar::from_grammar_args(grammar_args).expect("Failed to construct grammar");
+        grammar.optimize(25);
+        grammar.builder = grammar.create_builder();
+        let _ = grammar.build_grammar();
+
+        let code = grammar.emit_compiletime().to_string();
+
+        // The Data enum must contain a variant for each distinct type string.
+        // `Statement` and `LetStatement` have different string representations, so they
+        // must be assigned separate `__variant*` slots.  If the Identity bypass were
+        // incorrectly applied, the code-gen would only see one unique type string and
+        // produce a single variant, causing a debug-assertion panic at runtime.
+        assert!(
+            code.contains("LetStatement"),
+            "LetStatement type must appear in the emitted Data enum"
+        );
+        assert!(
+            code.contains("Statement"),
+            "Statement type must appear in the emitted Data enum"
+        );
+
+        // Both types should map to separate `__variant*` identifiers.
+        // Collect the distinct __variant names in the emitted code.
+        let distinct_variants: std::collections::HashSet<String> = {
+            let mut set = std::collections::HashSet::new();
+            let mut rest = code.as_str();
+            while let Some(pos) = rest.find("__variant") {
+                let after = &rest[pos + "__variant".len()..];
+                let end = after
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after.len());
+                set.insert(format!("__variant{}", &after[..end]));
+                rest = &rest[pos + 1..];
+            }
+            set
+        };
+        assert!(
+            distinct_variants.len() >= 2,
+            "Expected at least two distinct __variant* names for Statement and LetStatement, \
+             found: {:?}",
+            distinct_variants
         );
     }
 }
