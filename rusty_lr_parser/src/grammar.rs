@@ -2881,6 +2881,42 @@ impl Grammar {
         grammar
     }
 
+    /// Compute the type-key string used to identify Data enum variants for a given symbol.
+    ///
+    /// The key is `"<type>_boxed:<bool>"` where `<type>` is the whitespace-stripped string
+    /// representation of the Rust type.  This matches the key format used by
+    /// `emit_data_stack` when building `ruletype_variant_map`, so two symbols share a
+    /// Data variant if and only if their keys are equal.
+    ///
+    /// Returns `None` when the symbol carries no data (i.e. `ruletype` is `None` for a
+    /// nonterminal, or the token type is the unit type for a terminal).
+    fn data_variant_key(
+        &self,
+        symbol: Symbol<TerminalSymbol<usize>, usize>,
+    ) -> Option<String> {
+        match symbol {
+            Symbol::NonTerminal(idx) => {
+                self.nonterminals[idx].ruletype.as_ref().map(|ts| {
+                    let s: String = ts
+                        .to_string()
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect();
+                    format!("{}_boxed:{}", s, self.nonterminals[idx].ruletype_boxed)
+                })
+            }
+            Symbol::Terminal(_) => {
+                let s: String = self
+                    .token_typename
+                    .to_string()
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                Some(format!("{}_boxed:{}", s, self.is_tokentype_boxed))
+            }
+        }
+    }
+
     pub fn build_grammar(
         &mut self,
     ) -> rusty_lr_core::builder::DiagnosticCollector<TerminalSymbol<TerminalClass>> {
@@ -2967,43 +3003,10 @@ impl Grammar {
                                 // representations even though they are the same Rust type,
                                 // so they get different variants.  Bypassing in that case
                                 // would leave the wrong variant on the data stack.
-                                let source_symbol = rule.tokens[identity_idx].symbol;
-                                let source_key = match source_symbol {
-                                    Symbol::NonTerminal(src_idx) => {
-                                        self.nonterminals[src_idx].ruletype.as_ref().map(|ts| {
-                                            let s: String = ts
-                                                .to_string()
-                                                .chars()
-                                                .filter(|c| !c.is_whitespace())
-                                                .collect();
-                                            format!(
-                                                "{}_boxed:{}",
-                                                s, self.nonterminals[src_idx].ruletype_boxed
-                                            )
-                                        })
-                                    }
-                                    Symbol::Terminal(_) => {
-                                        let s: String = self
-                                            .token_typename
-                                            .to_string()
-                                            .chars()
-                                            .filter(|c| !c.is_whitespace())
-                                            .collect();
-                                        Some(format!("{}_boxed:{}", s, self.is_tokentype_boxed))
-                                    }
-                                };
-                                let target_key =
-                                    self.nonterminals[nonterm_idx].ruletype.as_ref().map(|ts| {
-                                        let s: String = ts
-                                            .to_string()
-                                            .chars()
-                                            .filter(|c| !c.is_whitespace())
-                                            .collect();
-                                        format!(
-                                            "{}_boxed:{}",
-                                            s, self.nonterminals[nonterm_idx].ruletype_boxed
-                                        )
-                                    });
+                                let source_key =
+                                    self.data_variant_key(rule.tokens[identity_idx].symbol);
+                                let target_key = self
+                                    .data_variant_key(Symbol::NonTerminal(nonterm_idx));
                                 if source_key == target_key {
                                     let idx = state
                                         .shift_goto_map_nonterm
@@ -3041,43 +3044,10 @@ impl Grammar {
                             Some(ReduceAction::Identity(identity_idx)) => {
                                 // Same guard as in the terminal shift loop above: only bypass
                                 // when source and target share the same Data enum variant.
-                                let source_symbol = rule.tokens[identity_idx].symbol;
-                                let source_key = match source_symbol {
-                                    Symbol::NonTerminal(src_idx) => {
-                                        self.nonterminals[src_idx].ruletype.as_ref().map(|ts| {
-                                            let s: String = ts
-                                                .to_string()
-                                                .chars()
-                                                .filter(|c| !c.is_whitespace())
-                                                .collect();
-                                            format!(
-                                                "{}_boxed:{}",
-                                                s, self.nonterminals[src_idx].ruletype_boxed
-                                            )
-                                        })
-                                    }
-                                    Symbol::Terminal(_) => {
-                                        let s: String = self
-                                            .token_typename
-                                            .to_string()
-                                            .chars()
-                                            .filter(|c| !c.is_whitespace())
-                                            .collect();
-                                        Some(format!("{}_boxed:{}", s, self.is_tokentype_boxed))
-                                    }
-                                };
-                                let target_key =
-                                    self.nonterminals[nonterm_idx].ruletype.as_ref().map(|ts| {
-                                        let s: String = ts
-                                            .to_string()
-                                            .chars()
-                                            .filter(|c| !c.is_whitespace())
-                                            .collect();
-                                        format!(
-                                            "{}_boxed:{}",
-                                            s, self.nonterminals[nonterm_idx].ruletype_boxed
-                                        )
-                                    });
+                                let source_key =
+                                    self.data_variant_key(rule.tokens[identity_idx].symbol);
+                                let target_key = self
+                                    .data_variant_key(Symbol::NonTerminal(nonterm_idx));
                                 if source_key == target_key {
                                     let idx = state
                                         .shift_goto_map_nonterm
