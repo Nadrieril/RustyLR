@@ -210,3 +210,76 @@ mod issue_89_optional_empty_branch {
         assert_eq!(results, vec![(Param::RefBool, ())]);
     }
 }
+
+/// Regression test for <https://github.com/ehwan/RustyLR/issues/91>:
+/// GLR parser stack-overflowed when a nullable production appeared before a
+/// left-recursive rule, causing the ε-reduce GOTO to loop back to the same
+/// LALR state indefinitely.
+#[cfg(test)]
+mod issue_91_nullable_before_left_recursive {
+    use rusty_lr::lr1;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Ast {
+        True,
+        And(Box<Ast>, Box<Ast>),
+    }
+
+    lr1! {
+        %glr;
+        %tokentype char;
+        %start Expr;
+
+        Expr(Ast)
+            : 't' { Ast::True }
+            | '!'? left=Expr '&' right=Expr {
+                Ast::And(Box::new(left), Box::new(right))
+            }
+            ;
+    }
+
+    #[test]
+    fn single_token_no_stack_overflow() {
+        // Previously caused a stack overflow on a single token due to an ε-cycle
+        // in the LALR table that the recursive GLR implementation followed infinitely.
+        let mut ctx = ExprContext::with_default_userdata();
+        ctx.feed('t').unwrap();
+        let parses: Vec<_> = ctx.accept_all().unwrap().collect();
+        assert_eq!(parses.len(), 1);
+        assert_eq!(parses[0].0, Ast::True);
+    }
+
+    #[test]
+    fn simple_and_parses() {
+        // `t & t` should yield exactly one parse: And(True, True)
+        let mut ctx = ExprContext::with_default_userdata();
+        for ch in "t&t".chars() {
+            ctx.feed(ch).unwrap();
+        }
+        let parses: Vec<_> = ctx
+            .accept_all()
+            .unwrap()
+            .map(|(ast, _)| ast)
+            .collect();
+        assert!(!parses.is_empty(), "should have at least one parse");
+        // Every parse must be And(True, True)
+        for ast in &parses {
+            assert_eq!(*ast, Ast::And(Box::new(Ast::True), Box::new(Ast::True)));
+        }
+    }
+
+    #[test]
+    fn nested_and_parses() {
+        // `t & t & t` should produce at least one valid parse without stack overflow.
+        let mut ctx = ExprContext::with_default_userdata();
+        for ch in "t&t&t".chars() {
+            ctx.feed(ch).unwrap();
+        }
+        let parses: Vec<_> = ctx
+            .accept_all()
+            .unwrap()
+            .map(|(ast, _)| ast)
+            .collect();
+        assert!(!parses.is_empty(), "should have at least one parse");
+    }
+}

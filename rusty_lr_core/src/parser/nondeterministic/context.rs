@@ -880,6 +880,10 @@ impl<
         class: P::TermClass,
         location: Data::Location,
         userdata: Data::UserData,
+        // States already reached via ε-reductions in the current reduce chain.
+        // Used to detect and break ε-cycles (e.g. a nullable production whose
+        // GOTO leads back to the same state, creating an infinite reduce loop).
+        eps_visited: &mut Vec<usize>,
     ) -> Result<
         (),
         (
@@ -919,6 +923,8 @@ impl<
                 let mut shift_ = false;
                 let l = reduces.len();
                 for (idx, reduce_rule) in reduces.into_iter().enumerate() {
+                    let reduce_idx = reduce_rule.into_usize();
+                    let rule_len = self.tables.rule(reduce_idx).len;
                     let mut pass = shift.is_some();
                     let mut branch_userdata = userdata.clone();
 
@@ -931,29 +937,43 @@ impl<
                         self.node_mut(node).child_count += 1;
                     }
                     match self.reduce(
-                        reduce_rule.into_usize(),
+                        reduce_idx,
                         node,
                         &term,
                         &mut pass,
                         &mut branch_userdata,
                     ) {
                         Ok(next_node) => {
-                            shift_ |= pass;
-                            // reduce recursively
-
-                            match self.feed_location_impl(
-                                next_node,
-                                term.clone(),
-                                class,
-                                location.clone(),
-                                branch_userdata,
-                            ) {
-                                Ok(_) => {
-                                    shifted = true;
+                            // For ε-productions (rule_len == 0), detect cycles: if GOTO leads
+                            // to a state already visited in the current ε-chain, skip this branch
+                            // to avoid infinite recursion caused by self-looping LALR states.
+                            let new_state = self.state(next_node);
+                            if rule_len == 0 && eps_visited.contains(&new_state) {
+                                self.try_remove_node_recursive(next_node);
+                            } else {
+                                shift_ |= pass;
+                                // reduce recursively; push new_state to eps_visited when ε-rule
+                                if rule_len == 0 {
+                                    eps_visited.push(new_state);
                                 }
-                                Err((reduced_node_, _, _, userdata_)) => {
-                                    reduced_node = reduced_node_;
-                                    reduced_userdata = userdata_;
+                                match self.feed_location_impl(
+                                    next_node,
+                                    term.clone(),
+                                    class,
+                                    location.clone(),
+                                    branch_userdata,
+                                    eps_visited,
+                                ) {
+                                    Ok(_) => {
+                                        shifted = true;
+                                    }
+                                    Err((reduced_node_, _, _, userdata_)) => {
+                                        reduced_node = reduced_node_;
+                                        reduced_userdata = userdata_;
+                                    }
+                                }
+                                if rule_len == 0 {
+                                    eps_visited.pop();
                                 }
                             }
                         }
@@ -1173,6 +1193,7 @@ impl<
             P::TermClass::ERROR,
             error_location.clone(),
             userdata,
+            &mut Vec::new(),
         ) {
             Ok(()) => {}
             Err((err_node, _, _, _)) => {
@@ -1213,6 +1234,7 @@ impl<
                 class,
                 location.clone(),
                 userdata,
+                &mut Vec::new(),
             ) {
                 // store to fallback nodes in case of all nodes failed to shift
                 self.fallback_nodes.push(node);
@@ -1271,6 +1293,7 @@ impl<
                             P::TermClass::ERROR,
                             error_location,
                             userdata,
+                            &mut Vec::new(),
                         ) {
                             return Err(ParseError {
                                 term: TerminalSymbol::Terminal(term),
@@ -1610,6 +1633,7 @@ Failed to shift nonterminal '{}' after reducing rule '{}'. This indicates a pars
                 P::TermClass::EOF,
                 node_eof_location,
                 userdata,
+                &mut Vec::new(),
             ) {
                 self.fallback_nodes.push(node);
                 self.fallback_userdatas.push(userdata);
